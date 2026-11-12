@@ -7,7 +7,7 @@
     >
       <template #seal>
         <div>{{ job?.created_by ?? '—' }}</div>
-        <div>样本 {{ job?.sample_count ?? 0 }} · 泄漏 {{ job?.leak_count ?? 0 }}</div>
+        <div>样本 {{ job?.sample_count ?? 0 }} · 泄漏 {{ job?.leak_count ?? 0 }} · 冲突 {{ job?.conflict_count ?? 0 }}</div>
       </template>
     </PageHeader>
 
@@ -31,6 +31,18 @@
         <div class="kpi">
           <div class="k">样本数</div>
           <div class="v">{{ job.sample_count }}</div>
+        </div>
+        <div class="kpi">
+          <div class="k">来源行数</div>
+          <div class="v">{{ job.source_row_count ?? '—' }}</div>
+        </div>
+        <div class="kpi">
+          <div class="k">冲突键</div>
+          <div class="v" :class="job.conflict_count ? 'is-annot' : 'is-ok'">{{ job.conflict_count }}</div>
+        </div>
+        <div class="kpi">
+          <div class="k">排除来源</div>
+          <div class="v" :class="job.excluded_count ? '' : 'is-ok'">{{ job.excluded_count }}</div>
         </div>
         <div class="kpi">
           <div class="k">命中样本</div>
@@ -70,6 +82,13 @@
       <LeakMatrix :matrix="report?.matrix ?? null" />
       <BoundaryProbeTable :probes="report?.boundary_probes ?? []" />
 
+      <MergeLedger
+        :summary="report?.merge_summary ?? null"
+        :included="report?.included_records ?? []"
+        :conflicts="report?.conflict_records ?? []"
+        :excluded="report?.excluded_records ?? []"
+      />
+
       <section class="card">
         <div class="card-title"><h2>泄漏明细</h2><span class="op-index">leaks</span></div>
         <p v-if="(report?.leaks ?? []).length === 0" class="muted small">当前口径下没有泄漏，样本可进训练集。</p>
@@ -94,13 +113,16 @@
         <div class="card-title"><h2>样本预览</h2><span class="op-index">sample_row</span></div>
         <table>
           <thead>
-            <tr><th>实体</th><th>标签时间</th><th>y</th><th>特征 JSON</th><th>泄漏</th></tr>
+            <tr><th>实体</th><th>标签时间</th><th>y</th><th>来源</th><th>特征 JSON</th><th>泄漏</th></tr>
           </thead>
           <tbody>
             <tr v-for="row in report?.sample_preview ?? []" :key="row.id">
               <td>{{ row.entity_key }}</td>
               <td>{{ fmtShortTime(row.label_time) }}</td>
               <td>{{ row.label }}</td>
+              <td class="mono" style="font-size: 0.72rem">
+                {{ (row.sources ?? []).map((s) => s.label_set_code || `LS#${s.label_set_id}`).join(' · ') || '—' }}
+              </td>
               <td>{{ JSON.stringify(row.features) }}</td>
               <td :style="{ color: row.has_leak ? 'var(--annot)' : 'inherit' }">
                 {{ row.has_leak ? '越界' : row.no_event ? '无事件' : '通过' }}
@@ -137,6 +159,7 @@ import ErrorNotice from '../components/common/ErrorNotice.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import BoundaryProbeTable from '../components/sample/BoundaryProbeTable.vue'
 import LeakMatrix from '../components/sample/LeakMatrix.vue'
+import MergeLedger from '../components/sample/MergeLedger.vue'
 import ParamSnapshotCard from '../components/sample/ParamSnapshotCard.vue'
 import { LEAK_KIND } from '../constants/enums'
 import { useApi } from '../hooks/useApi'

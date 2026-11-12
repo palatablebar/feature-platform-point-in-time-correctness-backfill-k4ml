@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS sample_row (
     label        INTEGER NOT NULL DEFAULT 0,
     features_json JSON NOT NULL DEFAULT '{}',
     leak_flags   JSON NOT NULL DEFAULT '[]',
+    sources      JSON NOT NULL DEFAULT '[]',
     has_leak     BOOLEAN NOT NULL DEFAULT false,
     no_event     BOOLEAN NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ DEFAULT now(),

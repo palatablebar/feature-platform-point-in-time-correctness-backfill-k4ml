@@ -14,6 +14,11 @@
   判定，输出 strict / inclusive 的判定表（off-by-one 探针）。
 * 失败态：时间戳无法归一 → ``bad_timestamp``；窗口内没有任何事件 →
   特征记 0（recency 记 -1）并在样本上标 ``no_event``（不 fail 整个 job）。
+* 同键来源合并：训练集 / 验证集混选时，``(entity_key, label_time)`` 相同的
+  标签来源行先合成一份可训练记录——标签一致保留全部来源；标签冲突整条键
+  退出训练并单独列入 ``conflicts``。合并结果只依赖键与
+  ``(label_set_id, label_row_id)`` 排序，与来源行的读入顺序无关，同一批
+  数据重复运行产出逐字一致。
 
 本模块是纯函数实现（不碰 DB），方便 seed、Celery 任务与 ``python -m``
 自测共用同一份计算逻辑。
@@ -27,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Sequence
 
-from src.constants.enums import AggregateKind, BoundaryPolicy, FailureReason, LeakKind
+from src.constants.enums import AggregateKind, BoundaryPolicy, ExclusionReason, FailureReason, LeakKind
 from src.utils.timefmt import BadTimestamp, iso_ms_z, iso_z, parse_ts
 
 WINDOW_SECONDS = {"1d": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
@@ -68,6 +73,8 @@ class LabelRow:
     entity_key: str
     label_time: datetime
     label: int = 0
+    label_set_code: str = ""
+    raw_label_time: str = ""
 
 
 class PitFailure(Exception):
@@ -129,6 +136,8 @@ def normalize_label_rows(raw_rows: Iterable[dict]) -> list[LabelRow]:
                 entity_key=str(raw["entity_key"]),
                 label_time=label_time,
                 label=int(raw.get("label") or 0),
+                label_set_code=str(raw.get("label_set_code", "")),
+                raw_label_time=str(raw.get("raw_label_time", "")),
             )
         )
     rows.sort(key=lambda r: (r.label_time, r.entity_key, r.id))
@@ -283,6 +292,115 @@ def boundary_probes(feature: FeatureSpec, label_time: datetime) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 同键来源合并（训练集 / 验证集混选时的去重与冲突隔离）
+# --------------------------------------------------------------------------- #
+def _source_ref(row: LabelRow) -> dict:
+    """一条标签来源行的溯源信息（谁投了这一票）。"""
+    return {
+        "label_row_id": row.id,
+        "label_set_id": row.label_set_id,
+        "label_set_code": row.label_set_code,
+        "label": row.label,
+    }
+
+
+def merge_label_rows(label_rows: Sequence[LabelRow]) -> dict:
+    """按 ``(entity_key, label_time)`` 把多个标签集的来源行合成可训练记录。
+
+    * 标签一致 → 一条入选记录，``sources`` 保留全部来源；
+    * 标签冲突 → 整条键进 ``conflicts``，全部来源行退出训练；
+    * ``excluded`` 是行级台账：被折叠的重复来源（``duplicate_source``）与
+      冲突键的全部来源（``label_conflict``）都逐行留痕；
+    * 所有排序只依赖 ``(entity_key, label_time)`` 与
+      ``(label_set_id, label_row_id)``——与标签集勾选顺序、来源行读入
+      顺序无关，同一批数据重复运行产出逐字一致（幂等）。
+    """
+    groups: dict[tuple[str, datetime], list[LabelRow]] = {}
+    for row in label_rows:
+        groups.setdefault((row.entity_key, row.label_time), []).append(row)
+
+    included: list[dict] = []
+    conflicts: list[dict] = []
+    excluded: list[dict] = []
+    trainable_rows: list[LabelRow] = []
+    sources_by_row: dict[int, list[dict]] = {}
+
+    for entity_key, label_time in sorted(groups, key=lambda key: (key[1], key[0])):
+        members = sorted(groups[(entity_key, label_time)], key=lambda r: (r.label_set_id, r.id))
+        sources = [_source_ref(row) for row in members]
+        labels = sorted({row.label for row in members})
+        canonical = members[0]
+        if len(labels) == 1:
+            included.append(
+                {
+                    "entity_key": entity_key,
+                    "label_time": iso_z(label_time),
+                    "label": canonical.label,
+                    "label_row_id": canonical.id,
+                    "source_count": len(sources),
+                    "sources": sources,
+                    "trainable": True,
+                }
+            )
+            trainable_rows.append(canonical)
+            sources_by_row[canonical.id] = sources
+            for duplicate in members[1:]:
+                excluded.append(
+                    {
+                        **_source_ref(duplicate),
+                        "entity_key": entity_key,
+                        "label_time": iso_z(label_time),
+                        "reason": ExclusionReason.DUPLICATE_SOURCE.value,
+                        "merged_into_label_row_id": canonical.id,
+                    }
+                )
+        else:
+            conflicts.append(
+                {
+                    "entity_key": entity_key,
+                    "label_time": iso_z(label_time),
+                    "labels": labels,
+                    "source_count": len(sources),
+                    "sources": sources,
+                    "trainable": False,
+                    "reason": ExclusionReason.LABEL_CONFLICT.value,
+                }
+            )
+            for member in members:
+                excluded.append(
+                    {
+                        **_source_ref(member),
+                        "entity_key": entity_key,
+                        "label_time": iso_z(label_time),
+                        "reason": ExclusionReason.LABEL_CONFLICT.value,
+                        "merged_into_label_row_id": None,
+                    }
+                )
+
+    duplicate_rows = sum(
+        1 for item in excluded if item["reason"] == ExclusionReason.DUPLICATE_SOURCE.value
+    )
+    summary = {
+        "input_rows": len(label_rows),
+        "unique_keys": len(groups),
+        "included_records": len(included),
+        "conflict_records": len(conflicts),
+        "excluded_records": len(excluded),
+        "duplicate_rows": duplicate_rows,
+        "conflict_rows": len(excluded) - duplicate_rows,
+        "trainable_samples": len(trainable_rows),
+    }
+    return {
+        "trainable_rows": trainable_rows,
+        "sources_by_row": sources_by_row,
+        "included": included,
+        "conflicts": conflicts,
+        "excluded": excluded,
+        "summary": summary,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 主流程：对一批标签行构建样本
 # --------------------------------------------------------------------------- #
 def build_samples(
@@ -291,7 +409,11 @@ def build_samples(
     label_rows: Sequence[LabelRow],
     effective_boundary: str | None = None,
 ) -> dict:
-    """对每个标签行按每个特征做点时间 join，并检测泄漏。
+    """对每个可训练样本键按每个特征做点时间 join，并检测泄漏。
+
+    入参 ``label_rows`` 先经 ``merge_label_rows`` 合并：同键且标签一致的
+    来源行只算一份样本（全部来源挂在 ``sources`` 上），同键标签冲突的键
+    整条退出训练、不参与特征计算与泄漏检测。
 
     ``effective_boundary`` 为 job 参数快照里的边界策略：若给定，它会覆盖特征
     定义里的边界（这就是「inclusive 误用」的来源），泄漏检测仍按严格口径判断。
@@ -299,12 +421,16 @@ def build_samples(
     if not features:
         raise PitFailure(FailureReason.NO_FEATURE.value, "样本任务未选择任何特征")
 
+    merged = merge_label_rows(label_rows)
+    trainable_rows = merged["trainable_rows"]
+    sources_by_row = merged["sources_by_row"]
+
     indexes = build_index(events)
     samples: list[dict] = []
     leaks: list[dict] = []
     no_event_samples = 0
 
-    for row in label_rows:
+    for row in trainable_rows:
         index = indexes.get(row.entity_key)
         features_json: dict[str, float] = {}
         feature_meta: dict[str, dict] = {}
@@ -354,6 +480,7 @@ def build_samples(
 
         if not any_event:
             no_event_samples += 1
+        sources = sources_by_row.get(row.id, [_source_ref(row)])
         samples.append(
             {
                 "label_row_id": row.id,
@@ -366,6 +493,8 @@ def build_samples(
                 "leak_flags": row_leaks,
                 "has_leak": bool(row_leaks),
                 "no_event": not any_event,
+                "sources": sources,
+                "source_count": len(sources),
             }
         )
 
@@ -393,6 +522,10 @@ def build_samples(
         },
         "sample_count": len(samples),
         "no_event_samples": no_event_samples,
+        "merge_summary": merged["summary"],
+        "included_records": merged["included"],
+        "conflict_records": merged["conflicts"],
+        "excluded_records": merged["excluded"],
     }
 
 
@@ -455,6 +588,10 @@ def build_report(
         "sample_count": built["sample_count"],
         "no_event_samples": built["no_event_samples"],
         "leak_free": built["leak_summary"]["leak_count"] == 0,
+        "merge_summary": built["merge_summary"],
+        "included_records": built["included_records"],
+        "conflict_records": built["conflict_records"],
+        "excluded_records": built["excluded_records"],
     }
 
 
@@ -500,6 +637,32 @@ def _self_test() -> int:
         bad_ts_detected = exc.reason == FailureReason.BAD_TIMESTAMP.value
     ok = ok and bad_ts_detected
 
+    # 同键来源合并：一致 → 一条入选、保留全部来源；冲突 → 整条退出训练；
+    # 来源行顺序颠倒后，入选 / 冲突 / 排除三份名单必须逐字一致。
+    t0 = datetime(2026, 3, 1, 8, 0, 0, tzinfo=timezone.utc)
+    merge_input = [
+        LabelRow(id=11, label_set_id=2, entity_key="ACC-1", label_time=t0, label=1, label_set_code="LS-B"),
+        LabelRow(id=12, label_set_id=1, entity_key="ACC-1", label_time=t0, label=1, label_set_code="LS-A"),
+        LabelRow(id=13, label_set_id=1, entity_key="ACC-2", label_time=t0, label=0, label_set_code="LS-A"),
+        LabelRow(id=14, label_set_id=2, entity_key="ACC-2", label_time=t0, label=1, label_set_code="LS-B"),
+    ]
+    merged_fwd = merge_label_rows(merge_input)
+    merged_rev = merge_label_rows(list(reversed(merge_input)))
+    merge_ok = (
+        merged_fwd["summary"]["included_records"] == 1
+        and merged_fwd["summary"]["conflict_records"] == 1
+        and merged_fwd["summary"]["excluded_records"] == 3
+        and merged_fwd["included"][0]["source_count"] == 2
+        and merged_fwd["included"][0]["label_row_id"] == 12
+        and merged_fwd["conflicts"][0]["labels"] == [0, 1]
+        and merged_fwd["conflicts"][0]["entity_key"] == "ACC-2"
+        and merged_fwd["included"] == merged_rev["included"]
+        and merged_fwd["conflicts"] == merged_rev["conflicts"]
+        and merged_fwd["excluded"] == merged_rev["excluded"]
+        and merged_fwd["trainable_rows"] == merged_rev["trainable_rows"]
+    )
+    ok = ok and merge_ok
+
     print(
         json.dumps(
             {
@@ -509,6 +672,8 @@ def _self_test() -> int:
                 "leak_overflow_ms": leak["overflow_ms"] if leak else None,
                 "boundary_equal_probe": probes[2],
                 "bad_timestamp_detected": bad_ts_detected,
+                "merge_summary": merged_fwd["summary"],
+                "merge_order_independent": merged_fwd["conflicts"] == merged_rev["conflicts"],
                 "ok": ok,
             },
             ensure_ascii=False,

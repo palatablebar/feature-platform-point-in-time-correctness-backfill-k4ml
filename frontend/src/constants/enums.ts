@@ -63,3 +63,8 @@ export const FAILURE_REASON: Record<string, string> = {
   insufficient_samples: '样本不足',
   no_feature: '未选择特征',
 }
+
+export const EXCLUSION_REASON: Record<string, string> = {
+  duplicate_source: '同键标签一致 · 折叠进合并样本',
+  label_conflict: '同键标签冲突 · 退出训练',
+}

@@ -77,6 +77,7 @@ def job_out(job) -> dict:
     snapshot = job.params_snapshot or {}
     result = job.result_json or {}
     leak_summary = result.get("leak_summary")
+    merge_summary = result.get("merge_summary") or {}
     return {
         "id": job.id,
         "code": job.code,
@@ -89,6 +90,9 @@ def job_out(job) -> dict:
         "boundary_policy": job.boundary_policy,
         "sample_count": job.sample_count,
         "leak_count": job.leak_count,
+        "conflict_count": merge_summary.get("conflict_records", 0),
+        "excluded_count": merge_summary.get("excluded_records", 0),
+        "source_row_count": merge_summary.get("input_rows"),
         "failure_reason": job.failure_reason,
         "created_by": job.created_by,
         "started_at": iso_z(job.started_at),
@@ -165,6 +169,7 @@ def event_out(row) -> dict:
 
 
 def sample_row_out(row) -> dict:
+    sources = row.sources or []
     return {
         "id": row.id,
         "label_row_id": row.label_row_id,
@@ -174,6 +179,8 @@ def sample_row_out(row) -> dict:
         "label": row.label,
         "features": row.features_json,
         "leak_flags": row.leak_flags,
+        "sources": sources,
+        "source_count": len(sources),
         "has_leak": row.has_leak,
         "no_event": row.no_event,
     }

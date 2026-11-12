@@ -3,8 +3,12 @@
 运行链路口径：
 1. 建 job 时冻结 ``params_snapshot``（标签集、特征版本、边界、范围），用于审计；
 2. 运行时重新读取「当前特征定义」计算——所以 owner 修正边界策略后重跑立即生效；
-3. ``pit_engine`` 真算每个 ``(entity, label_time)`` × 每个特征的聚合并检测泄漏；
-4. 结果落 ``sample_row``（逐样本特征 JSON + 泄漏标记）与 ``sample_job.result_json``。
+3. 多个标签集混选时先按 ``(entity_key, label_time)`` 合并同键来源：标签一致
+   合成一份可训练记录并保留全部来源；标签冲突整条键退出训练、单独列入
+   ``conflict_records``；合并结果与来源顺序无关，同一批数据重跑不新增样本；
+4. ``pit_engine`` 真算每个 ``(entity, label_time)`` × 每个特征的聚合并检测泄漏；
+5. 结果落 ``sample_row``（逐样本特征 JSON + 泄漏标记 + 来源）与
+   ``sample_job.result_json``（含入选 / 冲突 / 排除三份台账）。
 """
 from datetime import timedelta
 from typing import Iterable
@@ -74,6 +78,10 @@ def report(db: Session, job: SampleJob) -> dict:
         "run_snapshot": result.get("run_snapshot", {}),
         "failure": result.get("failure"),
         "leak_free": result.get("leak_free"),
+        "merge_summary": result.get("merge_summary", {}),
+        "included_records": result.get("included_records", []),
+        "conflict_records": result.get("conflict_records", []),
+        "excluded_records": result.get("excluded_records", []),
         "sample_preview": [sample_row_out(row) for row in rows],
         "sample_total": total,
     }
@@ -203,6 +211,10 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
 
         entity_keys = sorted({row.entity_key for row in label_rows})
         events = _load_events(db, entity_keys, range_end)
+        label_set_codes = {
+            item.id: item.code
+            for item in db.scalars(select(LabelSet).where(LabelSet.id.in_(list(job.label_set_ids or []))))
+        }
         engine_rows = [
             EngineLabelRow(
                 id=row.id,
@@ -210,6 +222,8 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
                 entity_key=row.entity_key,
                 label_time=row.label_time,
                 label=row.label,
+                label_set_code=label_set_codes.get(row.label_set_id, ""),
+                raw_label_time=row.raw_label_time,
             )
             for row in label_rows
         ]
@@ -227,11 +241,13 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
                     label=sample["label"],
                     features_json=sample["features"],
                     leak_flags=sample["leak_flags"],
+                    sources=sample.get("sources", []),
                     has_leak=sample["has_leak"],
                     no_event=sample["no_event"],
                 )
             )
 
+        merge_summary = report_payload.get("merge_summary", {})
         job.sample_count = report_payload["sample_count"]
         job.leak_count = report_payload["leak_summary"]["leak_count"]
         job.status = JobStatus.COMPLETED.value
@@ -246,6 +262,9 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
                 "engine": "pit_engine",
                 "executed_at": iso_z(utcnow()),
                 "label_rows": len(engine_rows),
+                "trainable_samples": merge_summary.get("trainable_samples", report_payload["sample_count"]),
+                "conflict_records": merge_summary.get("conflict_records", 0),
+                "excluded_records": merge_summary.get("excluded_records", 0),
                 "events_loaded": len(events),
             },
         }
@@ -255,6 +274,8 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
             code=job.code,
             samples=job.sample_count,
             leaks=job.leak_count,
+            conflicts=merge_summary.get("conflict_records", 0),
+            excluded=merge_summary.get("excluded_records", 0),
         )
         return job
     except PitFailure as failure:
@@ -274,6 +295,10 @@ def execute_job(db: Session, job: SampleJob) -> SampleJob:
             "matrix": {"features": [], "samples": [], "total_samples": 0, "shown_samples": 0},
             "boundary_probes": [],
             "leak_free": False,
+            "merge_summary": {},
+            "included_records": [],
+            "conflict_records": [],
+            "excluded_records": [],
         }
         db.commit()
         log_event("SAMPLE_JOB_FAILED", code=job.code, reason=failure.reason, message=failure.message)

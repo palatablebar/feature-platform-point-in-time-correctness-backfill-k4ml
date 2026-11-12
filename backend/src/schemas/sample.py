@@ -25,6 +25,9 @@ class SampleJobOut(BaseModel):
     boundary_policy: str
     sample_count: int
     leak_count: int
+    conflict_count: int = 0
+    excluded_count: int = 0
+    source_row_count: int | None = None
     failure_reason: str | None
     created_by: str
     started_at: str | None

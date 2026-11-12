@@ -75,9 +75,11 @@
           </div>
         </div>
         <p class="small muted">
-          预期样本数：
+          来源行数上限：
           <strong class="mono">{{ expectedSamples }}</strong>
-          （所选标签集行数合计）；边界策略由所选特征决定，混合时取最宽松口径并在快照里留痕。
+          （所选标签集行数合计）；同账户同观察时刻的来源会先合并——标签一致合成一条样本并保留全部来源，
+          标签冲突整条退出训练，实际样本数以工序 03 的合并台账为准。边界策略由所选特征决定，
+          混合时取最宽松口径并在快照里留痕。
         </p>
         <div class="actions">
           <button class="btn btn-annot" type="submit" :disabled="!auth.canRunSample || submitting">

@@ -64,6 +64,13 @@ class LeakKind(str, Enum):
     POLICY_MISMATCH = "policy_mismatch"     # 声明 strict 却按 inclusive 执行
 
 
+class ExclusionReason(str, Enum):
+    """同键来源合并时，一条标签来源行被排除出训练集的原因。"""
+
+    DUPLICATE_SOURCE = "duplicate_source"   # 同键标签一致：折叠进合并样本，不再单独成行
+    LABEL_CONFLICT = "label_conflict"       # 同键标签冲突：整条键退出训练
+
+
 class BackfillMode(str, Enum):
     FULL = "full"
     INCREMENTAL = "incremental"

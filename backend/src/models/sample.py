@@ -33,7 +33,11 @@ class SampleJob(Base):
 
 
 class SampleRow(Base):
-    """One materialised sample: label + the feature JSON computed by the PIT engine."""
+    """One materialised sample: label + the feature JSON computed by the PIT engine.
+
+    同键来源合并后，一行样本对应一个 ``(entity_key, label_time)`` 键；
+    ``label_row_id`` 指向该键的代表来源行，``sources`` 保留全部来源投票。
+    """
 
     __tablename__ = "sample_row"
     __table_args__ = (UniqueConstraint("job_id", "label_row_id", name="uq_sample_row"),)
@@ -47,6 +51,7 @@ class SampleRow(Base):
     label: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     features_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     leak_flags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    sources: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     has_leak: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     no_event: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

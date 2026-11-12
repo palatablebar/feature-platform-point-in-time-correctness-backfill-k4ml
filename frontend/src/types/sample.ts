@@ -58,6 +58,51 @@ export interface BoundaryProbe {
   leak_under_inclusive: boolean
 }
 
+export interface LabelSource {
+  label_row_id: number
+  label_set_id: number
+  label_set_code: string
+  label: number
+}
+
+export interface MergeSummary {
+  input_rows: number
+  unique_keys: number
+  included_records: number
+  conflict_records: number
+  excluded_records: number
+  duplicate_rows: number
+  conflict_rows: number
+  trainable_samples: number
+}
+
+export interface IncludedRecord {
+  entity_key: string
+  label_time: string
+  label: number
+  label_row_id: number
+  source_count: number
+  sources: LabelSource[]
+  trainable: boolean
+}
+
+export interface ConflictRecord {
+  entity_key: string
+  label_time: string
+  labels: number[]
+  source_count: number
+  sources: LabelSource[]
+  trainable: boolean
+  reason: string
+}
+
+export interface ExcludedRecord extends LabelSource {
+  entity_key: string
+  label_time: string
+  reason: string
+  merged_into_label_row_id: number | null
+}
+
 export interface SampleJob {
   id: number
   code: string
@@ -70,6 +115,9 @@ export interface SampleJob {
   boundary_policy: string
   sample_count: number
   leak_count: number
+  conflict_count: number
+  excluded_count: number
+  source_row_count: number | null
   failure_reason: string | null
   created_by: string
   started_at: string | null
@@ -100,6 +148,8 @@ export interface SampleRow {
   label: number
   features: Record<string, number>
   leak_flags: LeakItem[]
+  sources: LabelSource[]
+  source_count: number
   has_leak: boolean
   no_event: boolean
 }
@@ -112,6 +162,10 @@ export interface SampleReport {
   boundary_probes: BoundaryProbe[]
   run_snapshot: Record<string, unknown>
   failure: { reason: string; message: string; detail?: Record<string, unknown> } | null
+  merge_summary: MergeSummary
+  included_records: IncludedRecord[]
+  conflict_records: ConflictRecord[]
+  excluded_records: ExcludedRecord[]
   sample_preview: SampleRow[]
   sample_total: number
 }

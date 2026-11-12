@@ -38,6 +38,11 @@
 * **泄漏检测**：样本某特征窗口内任意事件 `event_ts >= label_time` 即为泄漏；
   `overflow_ms = round((event_ts − label_time) × 1000)`，并记录 `kind`
   （`boundary_equal` 越界 0ms / `boundary_over` 越界 > 0ms）与特征名。
+* **同键来源合并**：训练集 / 验证集混选时，先按 `(entity_key, label_time)` 把多个标签集的
+  来源行合成一份可训练记录——标签一致保留全部来源（`sources`），标签冲突整条键退出训练并
+  单独列入 `conflict_records`；被折叠的重复来源与冲突来源逐行记入 `excluded_records`
+  （`duplicate_source` / `label_conflict`）。合并只按样本键与 `(label_set_id, label_row_id)`
+  排序，与标签集勾选顺序无关；同一批数据重复运行不新增样本、台账逐字一致。
 * **边界探针**：对首个特征合成 `−1ms / 0ms / +1ms` 三个事件，用同一个 `includes_event()`
   输出 strict / inclusive 判定表（off-by-one 探针）。
 * **失败态**：时间戳无法归一 → job `failed`，`reason=bad_timestamp`；
@@ -87,7 +92,7 @@ PostgreSQL 映射在宿主机 `17727`。
 | `/features` | 01 | 特征定义列表 + 配方单编辑（DSL 预览、窗口/边界校验，共用 `FeatureDefinitionCard`） |
 | `/features/:id/versions` | 05 | 版本轨迹 + 审计轨迹 + 最近一次泄漏矩阵（复用 `LeakMatrix`） |
 | `/samples/new` | 02 | 样本构建（标签集/特征多选、参数快照预览，复用 `FeatureDefinitionCard` 口径摘要） |
-| `/samples/:id` | 03 | 点时间校验报告：泄漏矩阵 + 边界探针 + 泄漏明细 + 样本预览 |
+| `/samples/:id` | 03 | 点时间校验报告：泄漏矩阵 + 边界探针 + 泄漏明细 + 同键来源合并台账（入选 / 冲突 / 排除）+ 样本预览 |
 | `/backfills` | 04 | 回填任务：full vs incremental checksum 对照 + 差异明细 + 负例对照 |
 
 ## 6. 技术栈
@@ -150,6 +155,7 @@ gb-554/
 | 事件类型 `EventType` | 同上 | 同上 | seed、`schemas/feature.py`、`catalogue_service.py` |
 | 任务状态 `JobStatus` / `BackfillStatus` | 同上 | 同上 | `sample_service.py`、`backfill_service.py`、`StatusTag.vue` |
 | 泄漏类型 `LeakKind` | 同上 | 同上 | `pit_engine.detect_leak()`、`SampleDetailPage.vue` |
+| 排除原因 `ExclusionReason` | 同上 | 同上 | `pit_engine.merge_label_rows()`、`MergeLedger.vue` |
 | 错误码 `ErrorCode` | `src/constants/error_codes.py` | `src/constants/errorCodes.ts` | 后端 `AppError`；前端 `describeError()` |
 
 共享前端组件：`FeatureDefinitionCard`（/features 与 /samples/new）、`LeakMatrix`
